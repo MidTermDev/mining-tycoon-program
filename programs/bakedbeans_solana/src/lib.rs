@@ -17,7 +17,7 @@ pub mod bakedbeans_solana {
         global_state.market_gpus = 108_000_000_000; // 108B GPUs (Original model)
         global_state.initialized = true;
         global_state.hashpower_to_hire_1miner = 1_080_000; // 1.08M hash = 1 MH/s (12.5 days)
-        global_state.dev_fee_val = 10;
+        global_state.protocol_fee_val = 10;
         global_state.psn = 5_000;
         global_state.psnh = 10_000;
         
@@ -54,7 +54,7 @@ pub mod bakedbeans_solana {
             global_state.psnh,
         )?;
         
-        let fee = dev_fee(hashpower_bought, global_state.dev_fee_val)?;
+        let fee = protocol_fee(hashpower_bought, global_state.protocol_fee_val)?;
         let hashpower_after_fee = hashpower_bought.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
         
         let new_miners = hashpower_after_fee
@@ -143,7 +143,7 @@ pub mod bakedbeans_solana {
             global_state.psnh,
         )?;
         
-        let fee = dev_fee(hashpower_value, global_state.dev_fee_val)?;
+        let fee = protocol_fee(hashpower_value, global_state.protocol_fee_val)?;
         let payout = hashpower_value.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
         
         require!(payout > 0, ErrorCode::InvalidAmount);
@@ -266,7 +266,7 @@ fn calculate_trade(rt: u64, rs: u64, bs: u64, psn: u64, psnh: u64) -> Result<u64
     u64::try_from(result).map_err(|_| ErrorCode::Overflow.into())
 }
 
-fn dev_fee(amount: u64, fee_val: u8) -> Result<u64> {
+fn protocol_fee(amount: u64, fee_val: u8) -> Result<u64> {
     amount
         .checked_mul(fee_val as u64)
         .ok_or(ErrorCode::Overflow)?
@@ -474,7 +474,7 @@ pub struct GlobalState {
     pub market_gpus: u64,
     pub initialized: bool,
     pub hashpower_to_hire_1miner: u64,
-    pub dev_fee_val: u8,
+    pub protocol_fee_val: u8,
     pub psn: u64,
     pub psnh: u64,
 }
