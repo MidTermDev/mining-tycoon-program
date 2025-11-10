@@ -1,0 +1,22 @@
+[toolchain]
+package_manager = "yarn"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+bakedbeans_solana = "8P1NaZBBn2ENo78FNPZybATLs7wg7vGdu6BjXJiWAEb3"
+
+[programs.mainnet]
+bakedbeans_solana = "vfkjARttLMEns3qrxW58J8MiDXcTwcXzH8qZaYAVGPU"
+
+[registry]
+url = "https://api.apr.dev"
+
+[provider]
+cluster = "localnet"
+wallet = "~/.config/solana/id.json"
+
+[scripts]
+test = "yarn run mocha -t 1000000 tests/"
