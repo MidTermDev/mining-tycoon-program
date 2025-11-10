@@ -1,14 +1,17 @@
-# Mining Tycoon - Solana Mining Game
+# Mining Tycoon V2 - Dual Currency Solana Mining Game
 
-A hybrid yield farming protocol on Solana where users buy MH/s (mining power) that generates hash, which can be compounded for growth or claimed for SOL.
+A dual currency yield farming protocol on Solana where users buy MH/s (mining power) with SOL or $GPU tokens, generate hash continuously, and earn from BOTH SOL and GPU pools simultaneously.
 
 ## Overview
 
-**Mining Tycoon V2** uses a revolutionary hybrid model combining:
+**Mining Tycoon V2** uses a revolutionary dual currency hybrid model:
+- **Dual payment options**: Buy with SOL or $GPU tokens (15% GPU penalty)
+- **Dual vault system**: Separate SOL and GPU pools
+- **Dual rewards**: Earn from BOTH pools based on your MH/s share
 - **TVL-scaled buying** (prevents whale advantage)
-- **Hash generation** (MH/s produces hash over time)
-- **Dual options**: Compound (no fee) or Claim (10% fee)
-- **Mining pool earnings** (share of daily 10% TVL)
+- **Hash generation** (MH/s produces hash continuously)
+- **Compound or Claim**: Compound (no fee) or Claim both currencies (10% fee)
+- **Price oracle**: Live SOL/GPU price updates every 20 seconds
 
 ### Key Innovation
 
@@ -80,27 +83,41 @@ Compounding gives you MORE mining power for the same hash!
 **GlobalState**:
 - `total_mining_power`: u64 - Total MH/s in ecosystem
 - `total_unclaimed_sol`: u64 - Unclaimed SOL (excluded from mineable TVL)
+- `total_unclaimed_gpu`: u64 - Unclaimed GPU (excluded from mineable TVL)
 - `daily_pool_percentage`: u8 - % of TVL mineable per day (10%)
 - `base_buy_rate`: u64 - MH/s per SOL at TVL=1 (1000)
 - `protocol_fee_val`: u8 - Protocol fee (10%)
-- `dev_wallet`: Pubkey - Receives protocol fees for $GPU burns
+- `gpu_penalty_bps`: u16 - GPU buy penalty (1500 = 15%)
+- `sol_usd_price`: u64 - SOL price in USD (8 decimals)
+- `gpu_usd_price`: u64 - GPU price in USD (8 decimals)
+- `gpu_token_mint`: Pubkey - GPU token address (configurable)
+- `dev_wallet`: Pubkey - Receives protocol fees
 
 **UserState**:
 - `mining_power`: u64 - User's MH/s
-- `unclaimed_earnings`: u64 - Accumulated hash (hash or SOL depending on context)
+- `unclaimed_earnings`: u64 - Accumulated hash/SOL
+- `unclaimed_gpu_earnings`: u64 - Accumulated GPU
 - `last_claim`: i64 - Last claim/compound timestamp
 - `referrer`: Option<Pubkey> - Referrer address
+- `total_sol_claimed`: u64 - Lifetime SOL claimed
+- `total_gpu_claimed`: u64 - Lifetime GPU claimed
 
 ### Main Instructions
 
 **Core Functions**:
 1. `initialize(seed_amount, dev_wallet)` - Initialize program
 2. `buy_mining_power(amount, referrer)` - Buy MH/s with SOL
-3. `compound_hash()` - Convert hash → MH/s (no fee!)
-4. `claim_earnings()` - Claim SOL from mining pool (10% fee)
-5. `init_user()` - Initialize user account
+3. `buy_with_gpu(amount, referrer)` - Buy MH/s with $GPU tokens (15% penalty)
+4. `compound_hash()` - Convert hash → MH/s (no fee!)
+5. `claim_earnings()` - Claim both SOL and GPU from pools (10% fee each)
+6. `init_user()` - Initialize user account
 
-**Note**: No admin functions in public version for security
+**Admin Functions**:
+1. `update_prices(sol_usd, gpu_usd)` - Update price oracle
+2. `set_gpu_token(token_mint)` - Change GPU token address
+
+**View Functions**:
+1. `get_mhs_quote(sol_amount)` - Get exact MH/s quote for SOL amount
 
 ## How It Works
 
@@ -162,9 +179,32 @@ anchor run initialize --provider.cluster mainnet
 - Unclaimed SOL tracking prevents bank runs
 - No admin functions in public version
 
+## Dual Currency Features
+
+### Buy with SOL or $GPU
+- **SOL**: Standard bonding curve rate
+- **$GPU**: 15% penalty applied (costs more per MH/s in USD terms)
+- Users can choose their payment method
+
+### Dual Pool Earnings
+- **SOL Pool**: 10% of SOL vault daily
+- **GPU Pool**: 10% of GPU vault daily
+- Users earn from BOTH simultaneously based on MH/s share
+- Claim distributes both currencies at once
+
+### Price Oracle
+- Updates SOL and GPU USD prices every 20 seconds
+- Used for accurate MH/s calculations when buying with GPU
+- Ensures fair conversion rates
+
+### Configurable GPU Token
+- Admin can change GPU token address anytime
+- Allows switching to different tokens
+- Separate vaults for each token
+
 ## Live Deployment
 
-**Program ID**: `EfNnixKppGUq922Gzijt3mhDaKNAYsAFQ3BK9mtYGPU`
+**Program ID**: `t6YG88Q2wCsimhQ5gqSeRC8Wm5qVksw62urHAezPGPU`
 **Website**: MiningTycoon.fun
 
 ## License
