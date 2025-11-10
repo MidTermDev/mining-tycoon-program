@@ -71,7 +71,7 @@ Supply decreases → Scarcity increases
 
 ### Why Compounding is Better
 
-**Compound**: 86,400 hash → 1 MH/s (NO FEE!)
+**Compound**: 86,400 hash → 1 MH/s (NO FEE)
 **Claim**: 86,400 hash → 0.X SOL → Pay 10% fee → Buy back MH/s = LESS MH/s
 
 Compounding gives you MORE mining power for the same hash!
