@@ -9,7 +9,7 @@ skip-lint = false
 bakedbeans_solana = "8P1NaZBBn2ENo78FNPZybATLs7wg7vGdu6BjXJiWAEb3"
 
 [programs.mainnet]
-bakedbeans_solana = "vfkjARttLMEns3qrxW58J8MiDXcTwcXzH8qZaYAVGPU"
+bakedbeans_solana = "EfNnixKppGUq922Gzijt3mhDaKNAYsAFQ3BK9mtYGPU"
 
 [registry]
 url = "https://api.apr.dev"

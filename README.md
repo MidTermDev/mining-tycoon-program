@@ -1,98 +1,141 @@
 # Mining Tycoon - Solana Mining Game
 
-A sustainable yield farming protocol on Solana where users buy MH/s (mining power) that generates hash power, compound for exponential growth, or sell for SOL.
+A hybrid yield farming protocol on Solana where users buy MH/s (mining power) that generates hash, which can be compounded for growth or claimed for SOL.
 
 ## Overview
 
-**Mining Tycoon** is a fork of the original BakedBeans BSC miner, adapted for Solana using the Anchor framework with improved terminology and sustainable economics.
+**Mining Tycoon V2** uses a revolutionary hybrid model combining:
+- **TVL-scaled buying** (prevents whale advantage)
+- **Hash generation** (MH/s produces hash over time)
+- **Dual options**: Compound (no fee) or Claim (10% fee)
+- **Mining pool earnings** (share of daily 10% TVL)
 
-### Key Features
+### Key Innovation
 
-- **Buy MH/s**: Purchase mining power with SOL
-- **Compound**: Convert accumulated hash power into more MH/s
-- **Sell**: Exchange hash power for SOL anytime
-- **Referral System**: 5% bonus for referrers
-- **Sustainable Growth**: Battle-tested parameters from original BNB model
+The hybrid model solves the broken economics of bonding curves by separating buy and sell mechanics:
+- **Buy MH/s**: Rate scales with TVL (formula independent)
+- **Earn from pool**: Your share of daily 10% TVL
+- **Compound hash**: Direct conversion to MH/s (no fee!)
+- **Claim SOL**: Get your pool share (10% protocol fee)
 
 ## Economics
 
-### Parameters (Original BNB Model)
+### Hybrid Model Parameters
 
-- **Hash to MH/s**: 1,080,000 hash = 1 new MH/s (~12.5 days)
-- **Market GPUs**: 108 billion (sustainable pricing)
-- **Protocol Fee**: 10% (used for $GPU buyback & burn - see below)
-- **Referral Bonus**: 5%
-- **Virtual TVL Offset**: 100 SOL (prevents early advantage)
-- **Bonding Curve**: PSN=5,000, PSNH=10,000 (balanced)
+**Buy MH/s** (TVL-Scaled):
+- Base rate: 1000 MH/s per SOL at TVL=1
+- Formula: `(lamports × 1000 × 100) / (100e9 + vault_lamports)`
+- As TVL grows, buy rate decreases (but not extremely)
+- Example: 0.01 SOL → ~10 MH/s at TVL=1
 
-### Protocol Fee & $GPU Token Integration
+**Generate Hash**:
+- 1 MH/s = 1 hash per second
+- Accumulates continuously
+- No maximum cap
 
-The 10% protocol fee serves a dual purpose in the Mining Tycoon ecosystem:
+**Compound Hash** (No Fee!):
+- 86,400 hash = 1 new MH/s (1 day)
+- Direct conversion, no protocol fee
+- Best for exponential growth
+- Incentivized strategy
 
-1. **Revenue Generation**: Collected on all buy and sell transactions
-2. **$GPU Token Utility**: 100% of protocol fees are used to buy back and burn $GPU tokens
+**Claim SOL** (10% Fee):
+- Mining pool share: `(Your MH/s / Total MH/s) × (10% of TVL per day)`
+- Time-based accumulation
+- 10% protocol fee → $GPU buyback & burn
+- Get SOL immediately
 
-**How It Works**:
-- When users buy MH/s or sell hash power, 10% fee goes to protocol wallet
-- Protocol wallet periodically uses accumulated SOL to buy $GPU from the market
-- Purchased $GPU tokens are permanently burned (sent to dead address)
-- This creates continuous buy pressure and reduces $GPU supply
-- **Result**: Deflationary mechanism that increases $GPU scarcity over time
+### Protocol Fee & $GPU Token
+
+The 10% protocol fee on claimed SOL serves dual purpose:
+
+1. **Revenue Generation**: Collected when users claim SOL
+2. **$GPU Utility**: 100% used to buy back and burn $GPU tokens
+
+**Deflationary Mechanism**:
+```
+User claims SOL → 10% protocol fee collected
+Protocol accumulates fees → Buys $GPU from market  
+Purchased $GPU → Burned permanently
+Supply decreases → Scarcity increases
+```
 
 **Benefits**:
-- ✅ Aligns game growth with $GPU token value
-- ✅ More activity in Mining Tycoon = More $GPU burns
-- ✅ Sustainable tokenomics (not inflationary)
-- ✅ Incentivizes long-term holding of $GPU
+- ✅ Game growth = $GPU scarcity
+- ✅ Sustainable tokenomics
+- ✅ Incentivizes compounding (fee-free)
+- ✅ Creates positive feedback loop
 
-**Example**:
-```
-User buys 1 SOL of MH/s → 0.1 SOL protocol fee collected
-Protocol wallet accumulates fees → Buys $GPU from market
-Purchased $GPU → Burned permanently
-Supply decreases → Scarcity increases → Value potential rises
-```
+### Why Compounding is Better
 
-This mechanism ensures that as Mining Tycoon grows in popularity, $GPU token becomes increasingly scarce, creating a positive feedback loop between the game and the token economy.
+**Compound**: 86,400 hash → 1 MH/s (NO FEE!)
+**Claim**: 86,400 hash → 0.X SOL → Pay 10% fee → Buy back MH/s = LESS MH/s
 
-### How It Works
-
-1. **Each MH/s generates 1 hash per second**
-2. **Accumulate 1,080,000 hash → compound to get 1 new MH/s**
-3. **Max accumulation**: 12.5 days worth of hash
-4. **Compound regularly** for exponential growth
-5. **Sell anytime** for SOL (10% fee)
+Compounding gives you MORE mining power for the same hash!
 
 ## Smart Contract Structure
 
 ### State Accounts
 
 **GlobalState**:
-- `market_gpus`: u64 - Total GPU market supply
-- `hashpower_to_hire_1miner`: u64 - Hash needed for 1 MH/s
-- `protocol_fee_val`: u8 - Protocol fee percentage (used for $GPU buyback/burn)
-- `dev_wallet`: Pubkey - Protocol wallet that receives fees for $GPU burns
-- `psn/psnh`: u64 - Bonding curve parameters
+- `total_mining_power`: u64 - Total MH/s in ecosystem
+- `total_unclaimed_sol`: u64 - Unclaimed SOL (excluded from mineable TVL)
+- `daily_pool_percentage`: u8 - % of TVL mineable per day (10%)
+- `base_buy_rate`: u64 - MH/s per SOL at TVL=1 (1000)
+- `protocol_fee_val`: u8 - Protocol fee (10%)
+- `dev_wallet`: Pubkey - Receives protocol fees for $GPU burns
 
 **UserState**:
 - `mining_power`: u64 - User's MH/s
-- `accumulated_hashpower`: u64 - Accumulated hash
-- `last_compound`: i64 - Last compound timestamp
+- `unclaimed_earnings`: u64 - Accumulated hash (hash or SOL depending on context)
+- `last_claim`: i64 - Last claim/compound timestamp
 - `referrer`: Option<Pubkey> - Referrer address
 
 ### Main Instructions
 
-1. `initialize(seed_amount, dev_wallet)` - Initialize program (admin only)
+**Core Functions**:
+1. `initialize(seed_amount, dev_wallet)` - Initialize program
 2. `buy_mining_power(amount, referrer)` - Buy MH/s with SOL
-3. `compound_hashpower(referrer)` - Compound hash to MH/s
-4. `sell_hashpower()` - Sell hash for SOL
+3. `compound_hash()` - Convert hash → MH/s (no fee!)
+4. `claim_earnings()` - Claim SOL from mining pool (10% fee)
 5. `init_user()` - Initialize user account
 
-### Admin Functions
+**Note**: No admin functions in public version for security
 
-- `update_hashpower_requirement(new_value)` - Adjust hash per MH/s
-- `update_market_gpus(new_value)` - Adjust market supply
-- `multiply_user_mining_power()` - 10x boost for specific user
+## How It Works
+
+### 1. Buy MH/s
+
+User deposits SOL → Gets MH/s based on TVL-scaled rate
+
+```rust
+MH/s = (lamports × 1000 × 100) / (100e9 + vault_lamports)
+```
+
+### 2. Generate Hash
+
+Each MH/s generates 1 hash per second automatically.
+
+### 3. Use Hash
+
+**Option A: Compound** (Recommended!)
+- 86,400 hash → 1 MH/s
+- No protocol fee
+- Exponential growth
+- Better long-term ROI
+
+**Option B: Claim SOL**
+- Get share of daily mining pool
+- Formula: `(Your MH/s / Total MH/s) × (10% TVL per day) × time`
+- 10% protocol fee
+- Immediate SOL
+
+### 4. Unclaimed Tracking
+
+Unclaimed SOL is excluded from mineable TVL to prevent:
+- Bank runs
+- Negative balance scenarios
+- Unsustainable payouts
 
 ## Building
 
@@ -100,26 +143,29 @@ This mechanism ensures that as Mining Tycoon grows in popularity, $GPU token bec
 anchor build
 ```
 
-## Testing
-
-```bash
-anchor test
-```
-
 ## Deployment
 
-1. Update `Anchor.toml` with your program ID
-2. Build: `anchor build`
-3. Deploy: `solana program deploy`
-4. Initialize with dev wallet address
+```bash
+anchor deploy
+```
 
-## Security Considerations
+Then initialize:
+```bash
+anchor run initialize --provider.cluster mainnet
+```
 
-- All admin functions require authority signature
+## Security
+
 - User state is PDA-derived (cannot be spoofed)
 - Vault uses PDA signer for secure transfers
 - Overflow/underflow protection on all math
-- Virtual TVL offset prevents early whale advantage
+- Unclaimed SOL tracking prevents bank runs
+- No admin functions in public version
+
+## Live Deployment
+
+**Program ID**: `EfNnixKppGUq922Gzijt3mhDaKNAYsAFQ3BK9mtYGPU`
+**Website**: MiningTycoon.fun
 
 ## License
 
@@ -127,4 +173,4 @@ MIT
 
 ## Credits
 
-Based on the original BakedBeans BSC miner concept, adapted for Solana with sustainable parameters and improved terminology.
+Innovative hybrid model combining best of bonding curves and mining pools, adapted for Solana.

