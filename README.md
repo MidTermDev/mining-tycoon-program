@@ -20,10 +20,40 @@ A sustainable yield farming protocol on Solana where users buy MH/s (mining powe
 
 - **Hash to MH/s**: 1,080,000 hash = 1 new MH/s (~12.5 days)
 - **Market GPUs**: 108 billion (sustainable pricing)
-- **Dev Fee**: 10%
+- **Protocol Fee**: 10% (used for $GPU buyback & burn - see below)
 - **Referral Bonus**: 5%
 - **Virtual TVL Offset**: 100 SOL (prevents early advantage)
 - **Bonding Curve**: PSN=5,000, PSNH=10,000 (balanced)
+
+### Protocol Fee & $GPU Token Integration
+
+The 10% protocol fee serves a dual purpose in the Mining Tycoon ecosystem:
+
+1. **Revenue Generation**: Collected on all buy and sell transactions
+2. **$GPU Token Utility**: 100% of protocol fees are used to buy back and burn $GPU tokens
+
+**How It Works**:
+- When users buy MH/s or sell hash power, 10% fee goes to protocol wallet
+- Protocol wallet periodically uses accumulated SOL to buy $GPU from the market
+- Purchased $GPU tokens are permanently burned (sent to dead address)
+- This creates continuous buy pressure and reduces $GPU supply
+- **Result**: Deflationary mechanism that increases $GPU scarcity over time
+
+**Benefits**:
+- ✅ Aligns game growth with $GPU token value
+- ✅ More activity in Mining Tycoon = More $GPU burns
+- ✅ Sustainable tokenomics (not inflationary)
+- ✅ Incentivizes long-term holding of $GPU
+
+**Example**:
+```
+User buys 1 SOL of MH/s → 0.1 SOL protocol fee collected
+Protocol wallet accumulates fees → Buys $GPU from market
+Purchased $GPU → Burned permanently
+Supply decreases → Scarcity increases → Value potential rises
+```
+
+This mechanism ensures that as Mining Tycoon grows in popularity, $GPU token becomes increasingly scarce, creating a positive feedback loop between the game and the token economy.
 
 ### How It Works
 
@@ -40,7 +70,8 @@ A sustainable yield farming protocol on Solana where users buy MH/s (mining powe
 **GlobalState**:
 - `market_gpus`: u64 - Total GPU market supply
 - `hashpower_to_hire_1miner`: u64 - Hash needed for 1 MH/s
-- `dev_fee_val`: u8 - Fee percentage
+- `protocol_fee_val`: u8 - Protocol fee percentage (used for $GPU buyback/burn)
+- `dev_wallet`: Pubkey - Protocol wallet that receives fees for $GPU burns
 - `psn/psnh`: u64 - Bonding curve parameters
 
 **UserState**:
