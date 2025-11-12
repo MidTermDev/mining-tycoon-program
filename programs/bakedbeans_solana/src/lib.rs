@@ -37,6 +37,7 @@ pub mod bakedbeans_solana {
     }
 
     /// Buy MH/s with SOL - rate scales with TVL
+    /// SECURITY FIX: SOL transfer happens via CPI to prevent exploit
     pub fn buy_mining_power(ctx: Context<BuyMiningPower>, amount: u64, referrer: Option<Pubkey>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         require!(global_state.initialized, ErrorCode::NotInitialized);
@@ -51,7 +52,19 @@ pub mod bakedbeans_solana {
             user_state.referrer = Some(ref_key);
         }
         
-        // Calculate MH/s based on TVL
+        // SECURITY FIX: Transfer SOL via CPI to ensure payment actually happens
+        anchor_lang::system_program::transfer(
+            CpiContext::new(
+                ctx.accounts.system_program.to_account_info(),
+                anchor_lang::system_program::Transfer {
+                    from: ctx.accounts.buyer.to_account_info(),
+                    to: ctx.accounts.vault.to_account_info(),
+                },
+            ),
+            amount,
+        )?;
+        
+        // Now calculate MH/s based on actual payment
         let vault_balance = ctx.accounts.vault.to_account_info().lamports();
         let mhs_bought = calculate_mhs_for_sol(
             amount,
@@ -351,7 +364,6 @@ pub mod bakedbeans_solana {
                 .checked_sub(total_gpu_to_claim)
                 .ok_or(ErrorCode::Overflow)?;
             
-            // GPU vault ATA is owned by gpu_vault_authority PDA
             let gpu_vault_bump = ctx.bumps.gpu_vault_authority;
             let gpu_signer_seeds: &[&[&[u8]]] = &[&[b"gpu_vault", &[gpu_vault_bump]]];
             
@@ -476,27 +488,6 @@ pub mod bakedbeans_solana {
         msg!("GPU token mint updated to: {}", gpu_token_mint);
         
         Ok(())
-    }
-
-    /// View: Get quote for SOL amount - returns MH/s you'll receive
-    pub fn get_mhs_quote(ctx: Context<GetQuote>, sol_amount: u64) -> Result<u64> {
-        let global_state = &ctx.accounts.global_state;
-        let vault_balance = ctx.accounts.vault.to_account_info().lamports();
-        
-        let mhs_bought = calculate_mhs_for_sol(
-            sol_amount,
-            vault_balance,
-            global_state.base_buy_rate
-        )?;
-        
-        // Apply protocol fee
-        let fee_mhs = mhs_bought.checked_mul(global_state.protocol_fee_val as u64)
-            .ok_or(ErrorCode::Overflow)?
-            .checked_div(100)
-            .ok_or(ErrorCode::DivisionByZero)?;
-        let mhs_after_fee = mhs_bought.checked_sub(fee_mhs).ok_or(ErrorCode::Overflow)?;
-        
-        Ok(mhs_after_fee)
     }
 }
 
@@ -711,7 +702,7 @@ pub struct ClaimEarnings<'info> {
     #[account(mut)]
     pub gpu_vault: InterfaceAccount<'info, TokenAccount>,
     
-    /// CHECK: GPU Vault Authority (PDA that owns the GPU vault ATA)
+    /// CHECK: GPU Vault Authority PDA
     #[account(seeds = [b"gpu_vault"], bump)]
     pub gpu_vault_authority: AccountInfo<'info>,
     
@@ -743,16 +734,6 @@ pub struct SetGpuToken<'info> {
     pub global_state: Account<'info, GlobalState>,
     
     pub authority: Signer<'info>,
-}
-
-#[derive(Accounts)]
-pub struct GetQuote<'info> {
-    #[account(seeds = [b"global_state"], bump)]
-    pub global_state: Account<'info, GlobalState>,
-    
-    /// CHECK: Vault
-    #[account(seeds = [b"vault"], bump)]
-    pub vault: AccountInfo<'info>,
 }
 
 #[account]

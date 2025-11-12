@@ -202,6 +202,52 @@ anchor run initialize --provider.cluster mainnet
 - Allows switching to different tokens
 - Separate vaults for each token
 
+## Auto-Compound Bot
+
+Maximize your returns with the included auto-compound script that automatically compounds your hash every 60 seconds.
+
+### Setup
+
+1. **Get Free RPC Endpoint:**
+   - Visit [helius.dev](https://helius.dev) and sign up
+   - Get your free RPC URL (e.g., `https://mainnet.helius-rpc.com/?api-key=YOUR-KEY`)
+
+2. **Install Dependencies:**
+```bash
+npm install @coral-xyz/anchor @solana/web3.js
+```
+
+3. **Place Your Keypair:**
+   - Put your wallet keypair JSON in the repo as `keypair.json`
+   - OR set `KEYPAIR` environment variable to your keypair path
+
+4. **Run the Bot:**
+```bash
+# Using environment variables (recommended)
+RPC_URL="https://mainnet.helius-rpc.com/?api-key=YOUR-KEY" \
+KEYPAIR="path/to/your/keypair.json" \
+node auto-compound.js
+
+# Or with defaults (needs keypair.json in root)
+RPC_URL="https://mainnet.helius-rpc.com/?api-key=YOUR-KEY" \
+node auto-compound.js
+```
+
+### What It Does
+
+- Checks your hash every 60 seconds
+- Compounds when you have ≥86,400 hash (1 day's worth)
+- Converts hash → MH/s automatically (no fee!)
+- Runs 24/7 for maximum exponential growth
+- Logs each compound transaction
+
+### Pro Tips
+
+- Use a dedicated RPC for reliability (helius.dev free tier is perfect)
+- Run in background with PM2 or systemd for 24/7 operation
+- The more MH/s you have, the faster hash accumulates
+- Compounding is ALWAYS better than claiming due to zero fees
+
 ## Live Deployment
 
 **Program ID**: `t6YG88Q2wCsimhQ5gqSeRC8Wm5qVksw62urHAezPGPU`
