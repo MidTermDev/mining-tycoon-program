@@ -36,12 +36,13 @@ pub mod bakedbeans_solana {
         Ok(())
     }
 
-    /// Buy MH/s with SOL - rate scales with TVL
+    /// Buy MH/s with SOL - NEW: 1% of hashrate = 2% of TVL
     /// SECURITY FIX: SOL transfer happens via CPI to prevent exploit
     pub fn buy_mining_power(ctx: Context<BuyMiningPower>, amount: u64, referrer: Option<Pubkey>) -> Result<()> {
         let global_state = &mut ctx.accounts.global_state;
         require!(global_state.initialized, ErrorCode::NotInitialized);
         require!(amount > 0, ErrorCode::InvalidAmount);
+        require!(global_state.sol_usd_price > 0, ErrorCode::PriceNotSet);
         
         let user_state = &mut ctx.accounts.user_state;
         let clock = Clock::get()?;
@@ -64,12 +65,43 @@ pub mod bakedbeans_solana {
             amount,
         )?;
         
-        // Now calculate MH/s based on actual payment
+        // NEW PRICING MODEL: Calculate based on TVL percentage
+        // Convert SOL to USD
+        let sol_usd_value = (amount as u128)
+            .checked_mul(global_state.sol_usd_price as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(1_000_000_000) // SOL has 9 decimals, price has 8
+            .ok_or(ErrorCode::DivisionByZero)?;
+        
+        // Calculate total TVL in USD (SOL + GPU)
         let vault_balance = ctx.accounts.vault.to_account_info().lamports();
-        let mhs_bought = calculate_mhs_for_sol(
-            amount,
-            vault_balance,
-            global_state.base_buy_rate
+        let sol_tvl_usd = (vault_balance as u128)
+            .checked_mul(global_state.sol_usd_price as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(1_000_000_000)
+            .ok_or(ErrorCode::DivisionByZero)?;
+        
+        // Read GPU vault balance from token account data
+        let gpu_vault_balance = if ctx.accounts.gpu_vault.data_len() >= 72 {
+            let data = ctx.accounts.gpu_vault.try_borrow_data()?;
+            u64::from_le_bytes(data[64..72].try_into().unwrap_or([0; 8]))
+        } else {
+            0
+        };
+        
+        let gpu_tvl_usd = (gpu_vault_balance as u128)
+            .checked_mul(global_state.gpu_usd_price as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(1_000_000) // GPU has 6 decimals, price has 8
+            .ok_or(ErrorCode::DivisionByZero)?;
+        
+        let total_tvl_usd = sol_tvl_usd.checked_add(gpu_tvl_usd).ok_or(ErrorCode::Overflow)?;
+        
+        // Calculate MH/s using new model
+        let mhs_bought = calculate_mhs_for_usd(
+            sol_usd_value,
+            global_state.total_mining_power,
+            total_tvl_usd
         )?;
         
         // Apply protocol fee
@@ -89,16 +121,30 @@ pub mod bakedbeans_solana {
             .checked_add(mhs_after_fee)
             .ok_or(ErrorCode::Overflow)?;
         
-        // Referral bonus (5%)
-        if let Some(referrer_state) = ctx.accounts.referrer_state.as_mut() {
-            let referral_bonus = mhs_after_fee.checked_div(20).ok_or(ErrorCode::DivisionByZero)?;
-            referrer_state.mining_power = referrer_state.mining_power
-                .checked_add(referral_bonus)
-                .ok_or(ErrorCode::Overflow)?;
-            global_state.total_mining_power = global_state.total_mining_power
-                .checked_add(referral_bonus)
-                .ok_or(ErrorCode::Overflow)?;
-            msg!("Sent {} MH/s to referrer", referral_bonus);
+        // Referral bonus (5%) - skip if no referrer or referrer PDA doesn't exist
+        if let Some(ref_account_info) = &ctx.accounts.referrer_state {
+            // Only process if account is initialized (owned by our program)
+            if *ref_account_info.owner == *ctx.program_id && ref_account_info.data_len() >= 8 {
+                // Manually deserialize UserState
+                let data = ref_account_info.try_borrow_data()?;
+                if data.len() >= 40 { // At least has mining_power field
+                    let current_power_bytes: [u8; 8] = data[40..48].try_into().map_err(|_| ErrorCode::Overflow)?;
+                    let current_power = u64::from_le_bytes(current_power_bytes);
+                    
+                    let referral_bonus = mhs_after_fee.checked_div(20).ok_or(ErrorCode::DivisionByZero)?;
+                    let new_power = current_power.checked_add(referral_bonus).ok_or(ErrorCode::Overflow)?;
+                    
+                    // Write back (very unsafe, but needed for optional account)
+                    drop(data);
+                    let mut data = ref_account_info.try_borrow_mut_data()?;
+                    data[40..48].copy_from_slice(&new_power.to_le_bytes());
+                    
+                    global_state.total_mining_power = global_state.total_mining_power
+                        .checked_add(referral_bonus)
+                        .ok_or(ErrorCode::Overflow)?;
+                    msg!("Sent {} MH/s to referrer", referral_bonus);
+                }
+            }
         }
         
         msg!("Bought {} MH/s for {} lamports", mhs_after_fee, amount);
@@ -139,20 +185,35 @@ pub mod bakedbeans_solana {
         
         let sol_amount = u64::try_from(sol_equivalent).map_err(|_| ErrorCode::Overflow)?;
         
-        // Apply 15% penalty to sol_equivalent
-        let penalty = sol_amount
-            .checked_mul(global_state.gpu_penalty_bps as u64)
+        // Apply 15% penalty (GPU buyers pay more)
+        let gpu_usd_with_penalty = gpu_usd_value
+            .checked_mul(10000 + global_state.gpu_penalty_bps as u128)
             .ok_or(ErrorCode::Overflow)?
             .checked_div(10000)
             .ok_or(ErrorCode::DivisionByZero)?;
-        let sol_after_penalty = sol_amount.checked_sub(penalty).ok_or(ErrorCode::Overflow)?;
         
-        // Calculate MH/s based on SOL TVL (not GPU TVL)
-        let vault_balance = ctx.accounts.sol_vault.to_account_info().lamports();
-        let mhs_bought = calculate_mhs_for_sol(
-            sol_after_penalty,
-            vault_balance,
-            global_state.base_buy_rate
+        // Calculate total TVL in USD (SOL + GPU)
+        let sol_vault_balance = ctx.accounts.sol_vault.to_account_info().lamports();
+        let sol_tvl_usd = (sol_vault_balance as u128)
+            .checked_mul(global_state.sol_usd_price as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(1_000_000_000)
+            .ok_or(ErrorCode::DivisionByZero)?;
+        
+        let gpu_vault_balance = ctx.accounts.gpu_vault.amount;
+        let gpu_tvl_usd = (gpu_vault_balance as u128)
+            .checked_mul(global_state.gpu_usd_price as u128)
+            .ok_or(ErrorCode::Overflow)?
+            .checked_div(1_000_000)
+            .ok_or(ErrorCode::DivisionByZero)?;
+        
+        let total_tvl_usd = sol_tvl_usd.checked_add(gpu_tvl_usd).ok_or(ErrorCode::Overflow)?;
+        
+        // Calculate MH/s using new pricing model (after penalty)
+        let mhs_bought = calculate_mhs_for_usd(
+            gpu_usd_with_penalty,
+            global_state.total_mining_power,
+            total_tvl_usd
         )?;
         
         // Apply protocol fee
@@ -491,22 +552,19 @@ pub mod bakedbeans_solana {
     }
 }
 
-// Helper functions for new model
-fn calculate_mhs_for_sol(sol_amount: u64, vault_balance: u64, base_rate: u64) -> Result<u64> {
-    // Work with lamports to avoid integer division issues
-    // MH/s = (lamports × base_rate × 100) / (100e9 + vault_lamports)
+// NEW PRICING: 1% of network hashrate = 2% of total TVL (in USD)
+// Calculate MH/s based on TVL percentage model
+fn calculate_mhs_for_usd(usd_amount: u128, total_mhs: u64, tvl_usd: u128) -> Result<u64> {
+    // 1% of hashrate costs 2% of TVL
+    // MH/s = (USD / TVL) × total_MH/s × 0.5
+    // Rearranged: MH/s = (USD × total_MH/s) / (TVL × 2)
     
-    let lamports = sol_amount as u128;
-    let vault = vault_balance as u128;
-    let rate = base_rate as u128;
+    if tvl_usd == 0 || total_mhs == 0 {
+        return Ok(0);
+    }
     
-    // numerator = lamports × base_rate × 100
-    let numerator = lamports.checked_mul(rate).ok_or(ErrorCode::Overflow)?
-        .checked_mul(100).ok_or(ErrorCode::Overflow)?;
-    
-    // denominator = 100e9 + vault_lamports
-    let denominator = (100_000_000_000u128).checked_add(vault).ok_or(ErrorCode::Overflow)?;
-    
+    let numerator = usd_amount.checked_mul(total_mhs as u128).ok_or(ErrorCode::Overflow)?;
+    let denominator = tvl_usd.checked_mul(2).ok_or(ErrorCode::Overflow)?;
     let mhs = numerator.checked_div(denominator).ok_or(ErrorCode::DivisionByZero)?;
     
     u64::try_from(mhs).map_err(|_| ErrorCode::Overflow.into())
@@ -635,13 +693,15 @@ pub struct BuyMiningPower<'info> {
     #[account(mut, seeds = [b"vault"], bump)]
     pub vault: AccountInfo<'info>,
     
+    /// CHECK: GPU Vault ATA (for TVL calculation only)
+    pub gpu_vault: AccountInfo<'info>,
+    
     /// CHECK: Dev wallet
     #[account(mut, address = global_state.dev_wallet)]
     pub dev_wallet: AccountInfo<'info>,
     
-    /// CHECK: Optional referrer
-    #[account(mut)]
-    pub referrer_state: Option<Account<'info, UserState>>,
+    /// CHECK: Optional referrer (unchecked to allow null)
+    pub referrer_state: Option<AccountInfo<'info>>,
     
     pub system_program: Program<'info, System>,
 }
